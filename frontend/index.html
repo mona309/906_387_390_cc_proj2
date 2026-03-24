@@ -1,16 +1,120 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>Distributed Drawing Board</title>
+<title>Distributed Drawing Board - Mini-RAFT Demo</title>
 
 <style>
-body{
-margin:0;
-overflow:hidden;
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #f0f0f0;
 }
 
-canvas{
-border:1px solid black;
+.header {
+    background: #2c3e50;
+    color: white;
+    padding: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.title {
+    margin: 0;
+    font-size: 18px;
+}
+
+.status-panel {
+    background: white;
+    border: 1px solid #ddd;
+    padding: 10px;
+    margin: 10px;
+    border-radius: 5px;
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.status-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.status-label {
+    font-size: 12px;
+    color: #666;
+    margin-bottom: 5px;
+}
+
+.status-value {
+    font-weight: bold;
+    font-size: 14px;
+}
+
+.leader { color: #27ae60; }
+.candidate { color: #f39c12; }
+.follower { color: #3498db; }
+
+.connection-status {
+    padding: 5px 10px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.connected { background: #27ae60; color: white; }
+.disconnected { background: #e74c3c; color: white; }
+
+.controls {
+    background: white;
+    border: 1px solid #ddd;
+    padding: 10px;
+    margin: 10px;
+    border-radius: 5px;
+}
+
+.control-button {
+    background: #3498db;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 3px;
+    cursor: pointer;
+    margin-right: 10px;
+}
+
+.control-button:hover {
+    background: #2980b9;
+}
+
+.canvas-container {
+    margin: 10px;
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    padding: 10px;
+    display: inline-block;
+}
+
+canvas {
+    border: 1px solid #ccc;
+    background: white;
+    cursor: crosshair;
+}
+
+.instructions {
+    background: #ecf0f1;
+    border: 1px solid #bdc3c7;
+    padding: 10px;
+    margin: 10px;
+    border-radius: 5px;
+    font-size: 14px;
+}
+
+.instructions h3 {
+    margin-top: 0;
+    color: #2c3e50;
 }
 </style>
 
@@ -18,47 +122,218 @@ border:1px solid black;
 
 <body>
 
-<canvas id="board"></canvas>
+<div class="header">
+    <h1 class="title">Distributed Drawing Board - Mini-RAFT Consensus Demo</h1>
+    <div id="connection-status" class="connection-status connected">Connected</div>
+</div>
+
+<div class="status-panel" id="status-panel">
+    <!-- Status will be populated by JavaScript -->
+</div>
+
+<div class="controls">
+    <button class="control-button" onclick="clearCanvas()">Clear Canvas</button>
+    <button class="control-button" onclick="showFailoverInstructions()">Simulate Failover</button>
+    <button class="control-button" onclick="refreshStatus()">Refresh Status</button>
+</div>
+
+<div class="canvas-container">
+    <canvas id="board" width="800" height="600"></canvas>
+</div>
+
+<div class="instructions">
+    <h3>How to Use:</h3>
+    <ul>
+        <li>Draw on the canvas - your strokes will be replicated across all replicas</li>
+        <li>Open multiple browser tabs to see real-time collaboration</li>
+        <li>Click "Simulate Failover" to see instructions for testing leader failure</li>
+        <li>The status panel shows current RAFT state, leader, and log consistency</li>
+    </ul>
+</div>
+
+<div id="failover-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000;">
+    <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 20px; border-radius: 5px; max-width: 500px;">
+        <h3>Simulate Failover Instructions</h3>
+        <p>To simulate leader failure and observe automatic failover:</p>
+        <ol>
+            <li>Open a terminal in the project directory</li>
+            <li>Run: <code>docker ps</code> to see running containers</li>
+            <li>Find the current leader container (shown in status panel)</li>
+            <li>Run: <code>docker stop &lt;leader-container-name&gt;</code></li>
+            <li>Watch the status panel update as a new leader is elected</li>
+            <li>Drawing will continue seamlessly with the new leader</li>
+        </ol>
+        <button class="control-button" onclick="hideFailoverInstructions()">Close</button>
+    </div>
+</div>
 
 <script>
 
 const canvas = document.getElementById("board");
 const ctx = canvas.getContext("2d");
+const statusPanel = document.getElementById("status-panel");
+const connectionStatus = document.getElementById("connection-status");
 
-canvas.width = window.innerWidth;
-canvas.height = window.innerHeight;
-
-const ws = new WebSocket("ws://localhost:4000");
-
+let ws = new WebSocket("ws://localhost:4000");
 let drawing = false;
+let statusInterval;
 
-canvas.addEventListener("mousedown", ()=> drawing = true);
-canvas.addEventListener("mouseup", ()=> drawing = false);
+function initWebSocket() {
+    ws = new WebSocket("ws://localhost:4000");
+
+    ws.onopen = () => {
+        connectionStatus.textContent = "Connected";
+        connectionStatus.className = "connection-status connected";
+    };
+
+    ws.onclose = () => {
+        connectionStatus.textContent = "Disconnected";
+        connectionStatus.className = "connection-status disconnected";
+    };
+
+    ws.onerror = () => {
+        connectionStatus.textContent = "Connection Error";
+        connectionStatus.className = "connection-status disconnected";
+    };
+
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        ctx.fillRect(data.x, data.y, 2, 2);
+    };
+}
+
+canvas.addEventListener("mousedown", (e) => {
+    drawing = true;
+    draw(e);
+});
+
+canvas.addEventListener("mouseup", () => drawing = false);
+canvas.addEventListener("mouseout", () => drawing = false);
 
 canvas.addEventListener("mousemove", draw);
 
-function draw(e){
+function draw(e) {
+    if (!drawing) return;
 
-if(!drawing) return;
+    const rect = canvas.getBoundingClientRect();
+    const data = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+    };
 
-const data = {
-x:e.clientX,
-y:e.clientY
-};
+    ctx.fillRect(data.x, data.y, 2, 2);
 
-ctx.fillRect(data.x,data.y,2,2);
-
-ws.send(JSON.stringify(data));
-
+    if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(data));
+    }
 }
 
-ws.onmessage = (event)=>{
+async function fetchStatus() {
+    const endpoints = [
+        { url: "http://localhost:4000/status", name: "Gateway" },
+        { url: "http://localhost:5001/status", name: "Replica1" },
+        { url: "http://localhost:5002/status", name: "Replica2" },
+        { url: "http://localhost:5003/status", name: "Replica3" }
+    ];
 
-const data = JSON.parse(event.data);
+    const statuses = [];
 
-ctx.fillRect(data.x,data.y,2,2);
+    for (const endpoint of endpoints) {
+        try {
+            const response = await fetch(endpoint.url);
+            const data = await response.json();
+            statuses.push({ ...data, name: endpoint.name, available: true });
+        } catch (error) {
+            statuses.push({ name: endpoint.name, available: false, error: error.message });
+        }
+    }
 
-};
+    return statuses;
+}
+
+function updateStatusPanel(statuses) {
+    statusPanel.innerHTML = "";
+
+    // Find current leader
+    const leaderStatus = statuses.find(s => s.available && s.state === "leader");
+    const currentLeader = leaderStatus ? leaderStatus.node : "None";
+
+    // Add leader info
+    const leaderDiv = document.createElement("div");
+    leaderDiv.className = "status-item";
+    leaderDiv.innerHTML = `
+        <div class="status-label">Current Leader</div>
+        <div class="status-value leader">${currentLeader}</div>
+    `;
+    statusPanel.appendChild(leaderDiv);
+
+    // Add term info
+    const termDiv = document.createElement("div");
+    termDiv.className = "status-item";
+    const currentTerm = leaderStatus ? leaderStatus.term : "N/A";
+    termDiv.innerHTML = `
+        <div class="status-label">Current Term</div>
+        <div class="status-value">${currentTerm}</div>
+    `;
+    statusPanel.appendChild(termDiv);
+
+    // Add replica statuses
+    statuses.filter(s => s.name.startsWith("Replica")).forEach(status => {
+        const div = document.createElement("div");
+        div.className = "status-item";
+
+        if (status.available) {
+            const stateClass = status.state.toLowerCase();
+            div.innerHTML = `
+                <div class="status-label">${status.name}</div>
+                <div class="status-value ${stateClass}">${status.state}</div>
+                <div style="font-size: 10px; color: #666;">Log: ${status.logLength}</div>
+            `;
+        } else {
+            div.innerHTML = `
+                <div class="status-label">${status.name}</div>
+                <div class="status-value" style="color: #e74c3c;">Offline</div>
+            `;
+        }
+
+        statusPanel.appendChild(div);
+    });
+}
+
+async function refreshStatus() {
+    try {
+        const statuses = await fetchStatus();
+        updateStatusPanel(statuses);
+    } catch (error) {
+        console.error("Failed to refresh status:", error);
+    }
+}
+
+function clearCanvas() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function showFailoverInstructions() {
+    document.getElementById("failover-modal").style.display = "block";
+}
+
+function hideFailoverInstructions() {
+    document.getElementById("failover-modal").style.display = "none";
+}
+
+// Initialize
+initWebSocket();
+refreshStatus();
+
+// Auto-refresh status every 2 seconds
+statusInterval = setInterval(refreshStatus, 2000);
+
+// Reconnect WebSocket on connection loss
+setInterval(() => {
+    if (ws.readyState === WebSocket.CLOSED) {
+        initWebSocket();
+    }
+}, 5000);
 
 </script>
 
