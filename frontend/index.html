@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Distributed Drawing Board</title>
+
+<style>
+body{
+margin:0;
+overflow:hidden;
+}
+
+canvas{
+border:1px solid black;
+}
+</style>
+
+</head>
+
+<body>
+
+<canvas id="board"></canvas>
+
+<script>
+
+const canvas = document.getElementById("board");
+const ctx = canvas.getContext("2d");
+
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+const ws = new WebSocket("ws://localhost:4000");
+
+let drawing = false;
+
+canvas.addEventListener("mousedown", ()=> drawing = true);
+canvas.addEventListener("mouseup", ()=> drawing = false);
+
+canvas.addEventListener("mousemove", draw);
+
+function draw(e){
+
+if(!drawing) return;
+
+const data = {
+x:e.clientX,
+y:e.clientY
+};
+
+ctx.fillRect(data.x,data.y,2,2);
+
+ws.send(JSON.stringify(data));
+
+}
+
+ws.onmessage = (event)=>{
+
+const data = JSON.parse(event.data);
+
+ctx.fillRect(data.x,data.y,2,2);
+
+};
+
+</script>
+
+</body>
+</html>
