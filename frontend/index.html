@@ -134,7 +134,6 @@ canvas {
 <div class="controls">
     <button class="control-button" onclick="clearCanvas()">Clear Canvas</button>
     <button class="control-button" onclick="showFailoverInstructions()">Simulate Failover</button>
-    <button class="control-button" onclick="refreshStatus()">Refresh Status</button>
 </div>
 
 <div class="canvas-container">
@@ -144,26 +143,24 @@ canvas {
 <div class="instructions">
     <h3>How to Use:</h3>
     <ul>
-        <li>Draw on the canvas - your strokes will be replicated across all replicas</li>
+        <li>Draw on the canvas - strokes replicate across all replicas via RAFT consensus</li>
         <li>Open multiple browser tabs to see real-time collaboration</li>
-        <li>Click "Simulate Failover" to see instructions for testing leader failure</li>
-        <li>The status panel shows current RAFT state, leader, and log consistency</li>
+        <li>Click "Simulate Failover" to kill the current leader and watch automatic re-election</li>
+        <li>The status panel updates every 2 seconds showing each replica's state and log length</li>
     </ul>
 </div>
 
 <div id="failover-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000;">
-    <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 20px; border-radius: 5px; max-width: 500px;">
-        <h3>Simulate Failover Instructions</h3>
-        <p>To simulate leader failure and observe automatic failover:</p>
-        <ol>
-            <li>Open a terminal in the project directory</li>
-            <li>Run: <code>docker ps</code> to see running containers</li>
-            <li>Find the current leader container (shown in status panel)</li>
-            <li>Run: <code>docker stop &lt;leader-container-name&gt;</code></li>
-            <li>Watch the status panel update as a new leader is elected</li>
-            <li>Drawing will continue seamlessly with the new leader</li>
-        </ol>
-        <button class="control-button" onclick="hideFailoverInstructions()">Close</button>
+    <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 24px; border-radius: 8px; min-width: 420px;">
+        <h3 style="margin-top:0;">Failover Simulator</h3>
+        <div id="failover-status" style="margin-bottom: 16px; padding: 10px; background: #f8f9fa; border-radius: 4px; font-size: 14px;">
+            Ready. Click "Kill Leader" to simulate a failure.
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <button class="control-button" id="kill-btn" onclick="killLeader()">Kill Leader</button>
+            <button class="control-button" id="restore-btn" onclick="restoreNode()" style="display:none; background:#27ae60;">Restore Node</button>
+            <button class="control-button" onclick="hideFailoverModal()" style="background:#7f8c8d;">Close</button>
+        </div>
     </div>
 </div>
 
@@ -198,6 +195,10 @@ function initWebSocket() {
 
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
+        if (data.type === "clear") {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            return;
+        }
         ctx.fillRect(data.x, data.y, 2, 2);
     };
 }
@@ -229,26 +230,8 @@ function draw(e) {
 }
 
 async function fetchStatus() {
-    const endpoints = [
-        { url: "http://localhost:4000/status", name: "Gateway" },
-        { url: "http://localhost:5001/status", name: "Replica1" },
-        { url: "http://localhost:5002/status", name: "Replica2" },
-        { url: "http://localhost:5003/status", name: "Replica3" }
-    ];
-
-    const statuses = [];
-
-    for (const endpoint of endpoints) {
-        try {
-            const response = await fetch(endpoint.url);
-            const data = await response.json();
-            statuses.push({ ...data, name: endpoint.name, available: true });
-        } catch (error) {
-            statuses.push({ name: endpoint.name, available: false, error: error.message });
-        }
-    }
-
-    return statuses;
+    const response = await fetch("http://localhost:4000/cluster-status");
+    return await response.json();
 }
 
 function updateStatusPanel(statuses) {
@@ -284,9 +267,10 @@ function updateStatusPanel(statuses) {
 
         if (status.available) {
             const stateClass = status.state.toLowerCase();
+            const stateLabel = status.state === "candidate" ? "Electing..." : status.state;
             div.innerHTML = `
                 <div class="status-label">${status.name}</div>
-                <div class="status-value ${stateClass}">${status.state}</div>
+                <div class="status-value ${stateClass}">${stateLabel}</div>
                 <div style="font-size: 10px; color: #666;">Log: ${status.logLength}</div>
             `;
         } else {
@@ -311,14 +295,120 @@ async function refreshStatus() {
 
 function clearCanvas() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "clear" }));
+    }
 }
 
 function showFailoverInstructions() {
     document.getElementById("failover-modal").style.display = "block";
 }
 
-function hideFailoverInstructions() {
+function hideFailoverModal() {
     document.getElementById("failover-modal").style.display = "none";
+}
+
+let stoppedNode = null;
+
+async function killLeader() {
+    const killBtn = document.getElementById("kill-btn");
+    const restoreBtn = document.getElementById("restore-btn");
+    const statusDiv = document.getElementById("failover-status");
+
+    killBtn.disabled = true;
+    statusDiv.textContent = "Stopping current leader...";
+    statusDiv.style.color = "#e74c3c";
+
+    try {
+        const res = await fetch("http://localhost:4000/failover", { method: "POST" });
+        const data = await res.json();
+
+        if (data.error) {
+            statusDiv.textContent = "Error: " + data.error;
+            killBtn.disabled = false;
+            return;
+        }
+
+        stoppedNode = data.stopped;
+        killBtn.style.display = "none";
+        statusDiv.innerHTML = `<strong>${data.stopped}</strong> stopped. Waiting for new election...`;
+
+        let attempts = 0;
+        const poll = setInterval(async () => {
+            attempts++;
+            const statuses = await fetchStatus();
+            updateStatusPanel(statuses);
+            const newLeader = statuses.find(s => s.available && s.state === "leader");
+            if (newLeader) {
+                clearInterval(poll);
+                statusDiv.innerHTML = `Failover complete. New leader: <strong>${newLeader.node}</strong> (term ${newLeader.term})`;
+                statusDiv.style.color = "#27ae60";
+                restoreBtn.style.display = "inline-block";
+                restoreBtn.textContent = `Restore ${stoppedNode}`;
+                restoreBtn.disabled = false;
+            } else if (attempts > 20) {
+                clearInterval(poll);
+                statusDiv.textContent = "Timed out waiting for new leader.";
+            }
+        }, 500);
+
+    } catch (err) {
+        statusDiv.textContent = "Request failed: " + err.message;
+        killBtn.disabled = false;
+    }
+}
+
+async function restoreNode() {
+    if (!stoppedNode) return;
+    const killBtn = document.getElementById("kill-btn");
+    const restoreBtn = document.getElementById("restore-btn");
+    const statusDiv = document.getElementById("failover-status");
+
+    restoreBtn.disabled = true;
+    statusDiv.textContent = `Restoring ${stoppedNode}...`;
+    statusDiv.style.color = "#f39c12";
+
+    try {
+        const res = await fetch(`http://localhost:4000/restore/${stoppedNode}`, { method: "POST" });
+        const data = await res.json();
+
+        if (data.error) {
+            statusDiv.textContent = "Error: " + data.error;
+            restoreBtn.disabled = false;
+            return;
+        }
+
+        // Wait until the node actually comes back online
+        const nodeToRestore = stoppedNode;
+        let attempts = 0;
+        const poll = setInterval(async () => {
+            attempts++;
+            const statuses = await fetchStatus();
+            updateStatusPanel(statuses);
+            const restored = statuses.find(s => s.node === nodeToRestore && s.available);
+            if (restored) {
+                clearInterval(poll);
+                statusDiv.innerHTML = `<strong>${nodeToRestore}</strong> is back online as ${restored.state}.`;
+                statusDiv.style.color = "#3498db";
+                stoppedNode = null;
+                restoreBtn.style.display = "none";
+                killBtn.style.display = "inline-block";
+                killBtn.disabled = false;
+            } else if (attempts > 20) {
+                clearInterval(poll);
+                statusDiv.textContent = `${nodeToRestore} started but not yet responding.`;
+                restoreBtn.disabled = false;
+            }
+        }, 500);
+
+    } catch (err) {
+        statusDiv.textContent = "Request failed: " + err.message;
+        restoreBtn.disabled = false;
+    }
+}
+
+function hideFailoverInstructions() {
+    hideFailoverModal();
 }
 
 // Initialize

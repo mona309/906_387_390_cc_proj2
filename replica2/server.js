@@ -174,9 +174,14 @@ app.post("/append-entries", (req, res) => {
         return res.json({ term: currentTerm, success: false });
     }
 
-    if (term > currentTerm || state !== "follower") {
-        becomeFollower(term, incomingLeaderId);
+    if (term > currentTerm) {
+        currentTerm = term;
+        votedFor = null;
     }
+    state = "follower";
+    leaderId = incomingLeaderId;
+    stopHeartbeatTimer();
+    resetElectionTimer();
 
     if (!appendEntriesToLog(entries, prevLogIndex, prevLogTerm)) {
         return res.json({ term: currentTerm, success: false });
@@ -185,8 +190,6 @@ app.post("/append-entries", (req, res) => {
     if (leaderCommit !== undefined && leaderCommit > commitIndex) {
         commitIndex = Math.min(leaderCommit, log.length - 1);
     }
-
-    resetElectionTimer();
 
     res.json({ term: currentTerm, success: true });
 });

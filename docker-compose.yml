@@ -47,6 +47,7 @@ services:
     volumes:
       - ./gateway:/app
       - ./frontend:/app/frontend
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       replica1:
         condition: service_healthy
