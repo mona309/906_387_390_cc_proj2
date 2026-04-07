@@ -79,3 +79,5 @@ This script:
 
 - Run `./test.sh` from the project root.
 - It verifies leader election, replication, failover, and hot reload.
+"Contribution added by Veera" 
+"Contribution added by Veera" 
